@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+*.exe
+
+# Saídas do programa (contêm números de telefone)
+relatorio_ld.txt
+conferir_*.txt
+
+# Editor / SO
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
