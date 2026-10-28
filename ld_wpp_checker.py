@@ -13,6 +13,7 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -476,16 +477,64 @@ def fechar(indice):
     return False
 
 
+def instancia_existe(indice):
+    return any(i == int(indice) for i, _ in listar_instancias())
+
+
+def _apagar_arquivos(indice):
+    """Último recurso: apaga a pasta e o config da instância direto no disco."""
+    indice = int(indice)
+    if indice in PULAR_INDICES or indice == 0:
+        return
+    vms = os.path.join(os.path.dirname(LDCONSOLE), "vms")
+    pasta = os.path.join(vms, f"leidian{indice}")
+    cfg = os.path.join(vms, "config", f"leidian{indice}.config")
+    if os.path.isdir(pasta):
+        shutil.rmtree(pasta, ignore_errors=True)
+    for arq in (cfg, cfg + ".bak"):
+        try:
+            if os.path.exists(arq):
+                os.remove(arq)
+        except OSError:
+            pass
+
+
 def excluir(indice, nome):
-    """Exclui a instância. Retorna True se excluiu de verdade."""
+    """
+    Exclui a instância e CONFERE se ela sumiu da lista do LD.
+    Retorna "excluido", "teste" ou "falhou".
+    """
     fechar(indice)
     if MODO_TESTE:
         log(f"  [MODO TESTE] excluiria {rotulo(indice, nome)}")
-        return False
-    time.sleep(3)
-    ld("remove", "--index", indice, timeout=120)
-    log(f"  [EXCLUIDO] {rotulo(indice, nome)}")
-    return True
+        return "teste"
+
+    # garante que fechou de verdade antes de excluir
+    for _ in range(5):
+        if not esta_rodando(indice):
+            break
+        ld("quit", "--index", indice)
+        time.sleep(3)
+    time.sleep(5)          # tempo para o LD soltar os arquivos
+
+    for tentativa in range(1, 4):
+        ld("remove", "--index", indice, timeout=180)
+        time.sleep(3)
+        if not instancia_existe(indice):
+            log(f"  [EXCLUIDO] {rotulo(indice, nome)}")
+            return "excluido"
+        log(f"  {rotulo(indice, nome)} continua na lista após excluir (tentativa {tentativa}/3)")
+        time.sleep(5)
+
+    log(f"  {rotulo(indice, nome)}: apagando os arquivos da instância direto da pasta do LD")
+    _apagar_arquivos(indice)
+    time.sleep(2)
+    if not instancia_existe(indice):
+        log(f"  [EXCLUIDO] {rotulo(indice, nome)} (arquivos apagados)")
+        return "excluido"
+
+    log(f"  [ERRO] {rotulo(indice, nome)} NÃO consegui excluir")
+    return "falhou"
 
 
 def organizar_janelas():
@@ -520,15 +569,18 @@ def verificar(indice, nome, res):
     if status == "banido":
         log(f"  [BANIDO] {rotulo(indice, nome)}")
         res["banidas"].append((indice, nome, ""))
-        if excluir(indice, nome):
+        resultado = excluir(indice, nome)
+        if resultado == "excluido":
             res["limpas"].append(nome)
             return                      # instância apagada, nada a desligar
-        fechar_e_desligar(indice, nome)  # modo teste: continua existindo
+        if resultado == "falhou":
+            res["erro"].append((indice, nome, "BANIDO, mas não consegui excluir - exclua manualmente"))
+        fechar_e_desligar(indice, nome)  # continua existindo
         return
 
     if status == "ok":
         log(f"  [OK] {rotulo(indice, nome)}")
-        res["ok"].append(nome)
+        res["ok"].append((indice, nome, ""))
         if not FECHAR_OS_OK:
             return                      # fica aberto, então o ADB fica ligado
     elif status == "sem_wpp":
@@ -584,20 +636,21 @@ def relatorio(total_pc, verificadas, res, ignoradas):
 def lista_pendentes(res):
     """Gera um .txt com os LDs para conferir manualmente e abre no Bloco de Notas."""
     grupos = [
-        ("1. SEM WHATSAPP", res["sem_wpp"]),
-        ("2. NÃO CONSEGUIU ABRIR O WHATSAPP", res["nao_abriu"]),
-        ("3. OUTROS ERROS", res["erro"]),
+        ("SEM WHATSAPP", res["sem_wpp"]),
+        ("NÃO CONSEGUIU ABRIR O WHATSAPP", res["nao_abriu"]),
+        ("OUTROS ERROS", res["erro"]),
     ]
     if MODO_TESTE:
-        grupos.append(("4. BANIDOS (modo teste: NÃO foram excluídos - confira e exclua)", res["banidas"]))
+        grupos.append(("BANIDOS (modo teste: NÃO foram excluídos - confira e exclua)", res["banidas"]))
+    grupos.append(("OK (funcionando)", sorted(res["ok"])))
     if not any(lista for _, lista in grupos):
-        log("Nenhum LD para conferir manualmente.")
+        log("Nenhum LD verificado.")
         return
 
     agora = datetime.datetime.now()
-    linhas = [f"LDs PARA CONFERIR MANUALMENTE - {agora:%d/%m/%Y %H:%M}", ""]
-    for titulo, lista in grupos:
-        linhas.append(f"{titulo} ({len(lista)})")
+    linhas = [f"RESULTADO DA VERIFICAÇÃO - {agora:%d/%m/%Y %H:%M}", ""]
+    for n, (titulo, lista) in enumerate(grupos, 1):
+        linhas.append(f"{n}. {titulo} ({len(lista)})")
         linhas.append("-" * 42)
         if not lista:
             linhas.append("   (nenhum)")
@@ -680,4 +733,8 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nInterrompido pelo usuário.")
+    except Exception:
+        import traceback
+        print("\n[ERRO INESPERADO] Copie a mensagem abaixo:\n")
+        traceback.print_exc()
     input("\nPressione Enter para sair...")
